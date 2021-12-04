@@ -1,0 +1,212 @@
+---
+title: "p8105_hw6_yz4185.Rmd"
+author: "Yitian Zhang"
+output: github_document
+---
+
+```{r, message = FALSE, warning=FALSE}
+library(tidyverse)
+library(readr)
+library(modelr)
+library(patchwork)
+```
+
+### Problem 1
+
+##### Clean the data and concert numeric data to factor  
+
+```{r, message=FALSE}
+birthweight = 
+  read_csv("./data/birthweight.csv") %>% 
+  mutate(babysex = factor(babysex),
+         frace = factor(frace),
+         malform = factor(malform),
+         mrace = factor(mrace)) %>% 
+  mutate(bwt = bwt*0.00220462)
+
+birthweight %>% skimr::skim()
+```
+According to the output, there is no missing data.
+
+
+##### Beacuse of "Parsimony" rule, factor "Parity" will be eliminated at first. Then, I will include all factors in the model and kept thosed statistically significant to find the the fitted model. 
+
+```{r}
+model = lm(bwt ~.,data = birthweight)
+summary(model)
+
+model_1 = lm(bwt ~ babysex + bhead + blength + delwt + fincome + gaweeks + momage + mrace + parity, data = birthweight)
+summary(model_1)
+
+model_2 = lm(bwt ~ babysex + bhead + blength + delwt + fincome + gaweeks + mrace + parity, data = birthweight)
+summary(model_2)
+
+model_3 = lm(bwt ~ babysex + bhead + blength + delwt + fincome + gaweeks + mrace, data = birthweight)
+summary(model_3)
+
+``` 
+
+
+##### Make the plot,  the model comparisons, and the cross-validation by using modelr
+
+```{r}
+birthweight %>%
+  modelr::add_residuals(model_3) %>%
+  modelr::add_predictions(model_3) %>%
+  ggplot(aes(x = pred, y = resid)) +
+  geom_point() +
+  labs(x = "fitted values", y = "residuals")
+
+cv_df =
+  crossv_mc(birthweight, 100)  %>% 
+  mutate(
+    train = map(train, as_tibble),
+    test = map(test, as_tibble),
+    my_mod  = map(train, ~lm(bwt ~ babysex + bhead + blength + delwt + fincome + gaweeks + mrace, data = .x)),
+    model_4  = map(train, ~lm(bwt ~ blength + gaweeks, data = .x)),
+    model_5  = map(train, ~lm(bwt ~ bhead + blength + babysex + bhead*blength + bhead*babysex + blength*babysex + bhead*blength*babysex, data = .x))) %>%
+  mutate(
+    rmse_my_model = map2_dbl(my_mod, test, ~rmse(model = .x, data = .y)),
+    rmse_model_4 = map2_dbl(model_4, test, ~rmse(model = .x, data = .y)),
+    rmse_model_5 = map2_dbl(model_5, test, ~rmse(model = .x, data = .y)))
+cv_df %>% 
+  select(starts_with("rmse")) %>% 
+  pivot_longer(
+    everything(),
+    names_to = "model", 
+    values_to = "rmse",
+    names_prefix = "rmse_") %>% 
+  mutate(model = fct_inorder(model)) %>% 
+  ggplot(aes(x = model, y = rmse)) + geom_violin()
+
+cv_df =
+  crossv_mc(birthweight, 100)
+cv_df = 
+cv_df %>%
+  mutate(
+    mg_model = map(train, ~lm(bwt ~ gaweeks+mrace+ppbmi+fincome+momage, data = .x)),
+    main_effect = map(train, ~lm(bwt ~ blength + gaweeks, data = .x)),
+    saturated = map(train, ~lm(bwt ~ bhead*blength*babysex, data = .x))
+  ) %>%
+  mutate(
+    rmse_mg_model = map2_dbl(mg_model, test, ~rmse(model = .x, data = .y)),
+    rmse_main_effect = map2_dbl(main_effect, test, ~rmse(model = .x, data = .y)),
+    rmse_saturated = map2_dbl(saturated, test, ~rmse(model = .x, data = .y))
+  )
+```
+
+##### Look at distribution of RMSEs to see which model is best
+
+```{r}
+cv_df %>% 
+  select(starts_with("rmse")) %>% 
+  pivot_longer(
+    everything(),
+    names_to = "model", 
+    values_to = "rmse",
+    names_prefix = "rmse_") %>% 
+  mutate(model = fct_inorder(model)) %>% 
+  ggplot(aes(x = model, y = rmse)) +
+  geom_boxplot(aes(fill=model))+
+  theme_bw()+
+  labs(
+    x = "Model",
+    y = "RMSE",
+    title = "RMSE distribution across 3 models"
+  )+
+  theme(legend.position = "none")
+```
+According to the output, saturated model fits the best. 
+
+### Problem 2
+
+##### Load the noaa data
+
+```{r}
+weather_df = 
+  rnoaa::meteo_pull_monitors(
+    c("USW00094728"),
+    var = c("PRCP", "TMIN", "TMAX"), 
+    date_min = "2017-01-01",
+    date_max = "2017-12-31") %>%
+  mutate(
+    name = recode(id, USW00094728 = "CentralPark_NY"),
+    tmin = tmin / 10,
+    tmax = tmax / 10) %>%
+  select(name,id, everything())
+```
+
+##### Use 5000 bootstrap samples and for sample produce estimates of r hat sqaure and log($\hat\beta_0$ * $\hat\beta_1$)
+
+```{r}
+weather_bootstrap_results = 
+  weather_df %>% 
+  select(tmax, tmin) %>% 
+  bootstrap(n = 5000, id = "strap_number") %>%
+  mutate(
+    models = map(.x = strap, ~lm(tmax ~ tmin, data = .x)),
+    results_coeff = map(models, broom::tidy),
+    results_rsquare = map(models, broom::glance)
+  ) %>% 
+  select(strap_number, results_coeff, results_rsquare) %>% 
+  unnest(results_coeff) %>% 
+  select(strap_number,term, estimate, results_rsquare) %>% 
+  unnest(results_rsquare) %>% 
+  select(strap_number, term, estimate, r.squared)
+
+```
+
+```{r}
+beta0_df = 
+  weather_bootstrap_results %>% 
+  filter(term == "(Intercept)") %>% 
+  select(strap_number, estimate) %>% 
+  rename(beta0 = estimate)
+
+
+beta1_df = 
+  weather_bootstrap_results %>% 
+  filter(term == "tmin") %>%
+  select(strap_number,estimate) %>% 
+  rename(beta1 = estimate)
+
+betas_df = 
+  inner_join(beta0_df, beta1_df, by = "strap_number") %>% 
+  mutate(log_beta = log(beta0*beta1))
+
+betas_df %>% 
+  ggplot(aes(log_beta)) +
+  geom_density()
+```
+
+The distribution of log($\hat\beta_0$ * $\hat\beta_1$) looks like a good distribution overall. 
+
+##### Identify the 2.5% and 97.5% quantiles to provide a 95% confidence interval for log($\hat\beta_0$ * $\hat\beta_1$)
+
+```{r}
+
+quantile(betas_df$log_beta, c(.025, 0.975)) 
+
+```
+
+As a result, the 95% confidence interal for log($\hat\beta_0$ * $\hat\beta_1$) is (1.96, 2.05).
+
+##### Appy the same proccess for r hat sqaure
+
+```{r}
+rsquare_df = 
+  weather_bootstrap_results %>% 
+  select(strap_number, r.squared) %>% 
+  distinct(strap_number, .keep_all = TRUE)
+rsquare_df %>% 
+  ggplot(aes(r.squared)) +
+  geom_density()
+```
+
+The distribution of r hat square looks like a good normal distribution overall but slightly left-skewd. 
+
+```{r}
+quantile(rsquare_df$r.squared, c(.025, 0.975)) 
+```
+
+According to the output, the 95% confidence interal for r hat square is (0.89, 0.92).
